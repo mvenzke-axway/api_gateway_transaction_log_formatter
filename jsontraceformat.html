@@ -1,0 +1,179 @@
+<!doctype html>
+
+<html lang="en">
+    <head>
+        <title>JSON Transaction Trace Formatter</title>
+        <meta charset="utf-8">
+        <meta name="description" content="Format a JSON transaction trace to something readable by human">
+        <meta name="author" content="jpfaffenzeller@axway.com">
+        <style>
+            .error {
+                color: red;
+            }
+			html, body, div {
+				max-width: 100%;
+				overflow-x: hidden;
+				word-break: break-all;
+			}
+		 pre {
+            overflow-x: auto;
+            white-space: pre-wrap;
+            white-space: -moz-pre-wrap;
+            white-space: -pre-wrap;
+            white-space: -o-pre-wrap;
+            word-wrap: break-word;
+         }
+        </style>
+    </head>
+    <body>
+        <div id="container">
+            <div id="file">
+                <label for="tracefile">Select your JSON trace file</label>
+                <input type="file" id="tracefile" name="tracefile" accept="application/json"/>
+            </div>
+            <div><pre id="circuit"></pre></div>
+            <div><pre id="legs"></pre></div>
+            <div><pre id="output"></pre></div>
+        </div>
+        
+        <script>
+            (function () {
+                function readFile(input) {
+                
+                    function printCircuitPath(json, div, tab){
+                        for (let i=0; i < tab; i++) div.innerHTML += "  ";
+                        div.innerHTML += "+ " + json.policy + " (" + json.execTime + "ms)\n";
+                        tab +=1;
+                        json.filters.forEach( (obj) => {
+                            for (let i=0; i < tab; i++) div.innerHTML += "  ";
+                            div.innerHTML += "- " + obj.name + " (" + obj.status + " in " + obj.execTime + "ms)\n";
+                            if (obj.hasOwnProperty("subPaths")) {
+                                obj.subPaths.forEach( (o) => { 
+                                    printCircuitPath(o, div, tab+1); 
+                                 });
+                            }
+                        });
+                    }
+                    
+                    function setError(msg, div) {
+                        div.innerHTML = "An error occurred: \n";
+                        div.innerHTML += msg;
+                        div.classList.add("error");
+                    }
+                    
+                    function parseJSON(data, div) {
+                        try {
+                            return JSON.parse(data);
+                        } catch(error) {
+                            setError(error, div);
+                            return null;
+                        }
+                    }
+                    
+                    const file = input.target.files[0];
+                    const output = document.getElementById("output");
+                    output.innerHTML = "--- Transaction traces ---\n\n"; 
+                    const legs = document.getElementById("legs");
+                    legs.innerHTML = "--- Legs ---\n\n";
+                    const circuit = document.getElementById("circuit");
+                    circuit.innerHTML = "--- Circuit path ---\n\n";
+                    const reader = new FileReader();
+					
+					// Rewriting the innerHTML constantly is a performance nightmare.
+					// I'll pass these phony div objects to let it append strings without
+					// having to do a reflow, then steal the string from here and write it
+					// to the div *once* at the end.
+					var phonyTraceDiv = {innerHTML: "--- Transaction traces ---\n\n"};
+					var phonyCircuitDiv = {innerHTML: "--- Circuit path ---\n\n"};
+
+					function formatLeg(dir, item, idx, arr) {
+						arr[idx] = "- Leg " + idx + " (" + dir + ")\n" + "<textarea rows='25' cols='100' readonly style='resize: none;'>" + item + "</textarea>\n\n";
+					}
+
+					function formatSentLeg(item, idx, arr) {
+						formatLeg("sent", item, idx, arr);
+					}
+
+					function formatRcvdLeg(item, idx, arr) {
+						formatLeg("received", item, idx, arr);
+					}
+                    
+                    reader.readAsText(file);
+                    
+                    reader.onload = () => { 
+						let rcv = [];
+						let snd = [];
+						let buffer = "";
+                        const parsed = parseJSON(reader.result, output);
+                        if (parsed) {
+                            output.classList.remove("error");	// Allowed to use real div, clears errors.
+                            circuit.classList.remove("error");
+                            parsed.forEach( (obj) => {
+                                if (obj.tag === "circuitpath") {
+									buffer += obj.data;
+                                    const c = parseJSON(buffer, circuit); // Can go to the real div, it only sends errors there.
+                                    if (c) {
+				                        circuit.classList.remove("error");
+                                        c.forEach( (policies) => { printCircuitPath(policies, phonyCircuitDiv, 0); });										
+									}
+                                }
+
+								if (obj.tag === "sent") {
+									if (snd[obj.leg]) {
+										snd[obj.leg] += obj.data;
+									} else {
+										snd[obj.leg] = obj.data;
+									}
+								}
+
+								if (obj.tag === "received") {
+									if (rcv[obj.leg]) {
+										rcv[obj.leg] += obj.data;
+									} else {
+										rcv[obj.leg] = obj.data;
+									}
+								}
+
+                                if (obj.tag === "trace") {
+									if (obj.data.level === "ERROR") {
+								           phonyTraceDiv.innerHTML += '<span style="background-color: red;">' + obj.data.level + '</span>\t';
+								    } else {
+								           phonyTraceDiv.innerHTML += obj.data.level + "\t";
+								    }
+                                    const d = new Date(obj.data.time);
+                                    phonyTraceDiv.innerHTML += d.toISOString() + "\t";
+                                    for (let i=0; i < obj.data.depth; i++) phonyTraceDiv.innerHTML += "\t";
+                                    phonyTraceDiv.innerHTML += obj.data.text + "\n";
+                                }
+                            });
+                        }
+						snd.forEach(formatSentLeg);
+						rcv.forEach(formatRcvdLeg);
+
+						let legHTML = "--- Legs ---\n\n";
+						for (var i = 0; i < snd.length; i++) {
+							if (rcv[i]) {
+								legHTML += rcv[i];
+							}
+							if (snd[i]) {
+								legHTML += snd[i];
+							}
+						}
+						legs.innerHTML = legHTML;
+						
+						// Output our completed data and reflow only *once*
+						circuit.innerHTML = phonyCircuitDiv.innerHTML;
+						output.innerHTML = phonyTraceDiv.innerHTML;
+						
+                    }
+                    reader.onerror = () => { 
+                        setError(reader.error, output);  // Allowed to output to real div.
+                    }
+                }
+                
+                const trace = document.getElementById("tracefile");
+                trace.addEventListener("change", readFile);
+            })();
+        </script>
+    </body>
+</html>
